@@ -1,0 +1,178 @@
+#!/usr/bin/env python2
+# Authors: Cameron#
+import torch
+import torch.nn as nn
+import rospy
+import os
+import json
+import numpy as np
+import random
+import time
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
+from collections import deque
+from std_msgs.msg import Float32MultiArray
+from src.turtlebot3_dqn.env_ddpg_1 import Env
+# import torch
+# import torchvision
+from src.turtlebot3_dqn.DDPG import DDPG
+
+LR_A = 0.001    # learning rate for actor
+LR_C = 0.002    # learning rate for critic
+GAMMA = 0.9     # reward discount
+TAU = 0.01      # soft replacement
+
+MEMORY_CAPACITY = 1001
+BATCH_SIZE = 64
+epochs = 1000
+steps = 250
+learnStart = 70
+update_freq = 4
+
+EXPLORE = MEMORY_CAPACITY  # frames over which to anneal epsilon
+INITIAL_EPSILON = 1 # starting value of epsilon
+FINAL_EPSILON = 0.01 # final value of epsilon
+explorationRate = INITIAL_EPSILON
+current_epoch = 0
+loadsim_seconds = 0
+
+device = torch.device('cuda:0')
+
+# python -m visdom.server  
+from visdom import Visdom 
+visualization = True
+if visualization:
+    viz = Visdom(env='turtlebot3_ddpg')
+reward_opt = {  # options for visualization of reward
+    'title' :'CReward',
+    "xlabel":'episode',
+    "ylabel":'reward',
+}
+train_opt = {  # options for visualization of training reward
+    'title' :'Training',
+    "xlabel":'episode',
+    "ylabel":'reward',
+}
+collision_opt = {  # options for visualization of collision number
+    'title' :'Collision_num',
+    "xlabel":'episode',
+    "ylabel":'collision',
+}
+goal_opt = {  # options for visualization of goal number
+    'title' :'Goal_num',
+    "xlabel":'episode',
+    "ylabel":'goal',
+}
+
+if __name__ == '__main__':
+    rospy.init_node('turtlebot3_ddpg_stage_1')
+
+    state_size =  8
+    action_size = 2
+    action_bound = 1
+    env = Env(action_size)
+
+    #agent = ReinforceAgent(state_size, action_size)
+    agent = DDPG(state_size, action_size, action_bound)
+    load_network = False
+    load_path = '/home/cameron/turtlebot3/src/turtlebot3_machine_learning-master/turtlebot3_dqn/Episode700-CReward-595.42-totalstep134578-explore0.009011.pth'
+    if load_network:
+        print "load model"
+        agent.load_state_dict(torch.load(load_path))
+
+
+    agent = agent.to(device) #transfer mobel from CPU  to the GPU
+    scores, episodes = [], []
+    start_time = time.time()
+    stepCounter = 0
+    for episode in xrange(current_epoch+1, epochs+1, 1):
+        state_img, state_pos= env.reset()
+        scores, episodes = [], []
+        reward_sum = 0
+        done = False
+        collision_num = 0
+        goal_num = 0
+        #print("epoch+1!\n")
+        if episode == learnStart:
+            print("Starting learning")
+        # number of timesteps
+        for t in xrange(steps):
+            #use GPU to  train the data
+            action = agent.choose_action(state_img,state_pos)
+            #convert action from (type = gpu) to (type = cpu)
+            action = action.data.cpu().numpy()
+            # add exploration noise
+            action = np.clip(np.random.normal(action, explorationRate), 0, 1)  # add randomness to action selection for exploration
+        
+            # remain 2 decimal places
+            action[0] = round(action[0] * 0.26, 2)  #linear: 0~0.26
+            action[1] = round(action[1] * 2 * 1.82 - 1.82, 2) #angular:-1.82~1.82 
+            
+            # agents interact with environment
+            newstate_img,newstate_pos, reward, d, info = env.step(action)
+            
+            # store the transitions
+            agent.store_transition(state_img,state_pos, action, reward, newstate_img,newstate_pos)
+
+            # update the state
+            # env._flush(force=True)
+            state_img = newstate_img
+            state_pos = newstate_pos
+            reward_sum += reward
+
+            #We reduced the epsilon gradually
+            if explorationRate > FINAL_EPSILON and episode > learnStart and stepCounter % 20 == 0:
+                explorationRate -= (INITIAL_EPSILON - FINAL_EPSILON) / EXPLORE
+
+
+            if episode >= learnStart and stepCounter % update_freq == 0:
+                agent.learn()
+
+            done = False
+            if d == 1:
+                collision_num += 1
+                done = True
+            elif d == 2:
+                goal_num += 1
+                done = True
+            else:
+                done = False
+            
+            if (t == steps-1):
+                print ("Time out!!")
+                done = True
+                env.jump += 1 
+                
+            if done:
+                #agent.updateTargetModel()
+                episodes.append(t)
+                m, s = divmod(int(time.time() - start_time), 60)
+                h, m = divmod(m, 60)
+                print "EP "+str(episode)+" - {} steps".format(t+1)+" - CReward: "+str(round(reward_sum,3)) +"  Eps="+str(round(explorationRate, 2))+"  Time: %d:%02d:%02d" % (h, m, s) 
+                break
+        
+            stepCounter += 1
+            
+        if visualization:
+            viz.line(X=[episode],Y=[reward_sum], win='Iteration', opts=reward_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+        if visualization and  episode >= learnStart:
+            viz.line(X=[episode],Y=[reward_sum], win='Training', opts=train_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+        if visualization and  episode %100 == 0:
+            viz.line(X=[episode],Y=[collision_num], win='collision_num', opts=collision_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+            collision_num = 0      
+            viz.line(X=[episode],Y=[goal_num], win='goal_num', opts=goal_opt,update=None if episode > MEMORY_CAPACITY else 'append')    
+            goal_num = 0
+        if episode % 100 ==0:
+            #save model weights and monitoring data every 100 episodes.
+            torch.save(agent.state_dict(), '/home/cameron/turtlebot3/src/turtlebot3_machine_learning-master/turtlebot3_dqn/mymodels/Episode%d-CReward%.2f-totalstep%d-explore%f.pth' % (episode, reward_sum,stepCounter,explorationRate))
+
+       
+   
+
+  
+
+
+  
+
+
+ 

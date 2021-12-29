@@ -1,0 +1,229 @@
+#!/usr/bin/env python2
+# Authors: Cameron#
+import torch
+import torch.nn as nn
+import rospy
+import os
+import json
+import numpy as np
+import random
+import time
+import sys
+
+
+sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
+from collections import deque
+from std_msgs.msg import Float32MultiArray
+from src.turtlebot3_dqn.env_ddpg_lstm import Env
+from src.turtlebot3_dqn.DDPG_LSTM import DDPG_LSTM, experience_buffer
+from src.turtlebot3_dqn.DDPG_PER import PrioritizedReplayBuffer
+from src.turtlebot3_dqn import utils
+
+
+########### training visualization #############
+#befor use: set visualization to True and run command:
+# python -m visdom.server  
+from visdom import Visdom 
+visualization = True
+if visualization:
+    viz = Visdom(env='turtlebot3_ddpg_lstm')
+reward_opt = {  # options for visualization of reward
+    'title' :'CReward',
+    "xlabel":'episode',
+    "ylabel":'reward',
+}
+train_opt = {  # options for visualization of training reward
+    'title' :'Training',
+    "xlabel":'episode',
+    "ylabel":'reward',
+}
+collision_opt = {  # options for visualization of collision number
+    'title' :'Collision_num',
+    "xlabel":'episode',
+    "ylabel":'collision',
+}
+goal_opt = {  # options for visualization of goal number
+    'title' :'Goal_num',
+    "xlabel":'episode',
+    "ylabel":'goal',
+}
+
+###########HyperParameters ################
+LR_A = 0.001    # learning rate for actor
+LR_C = 0.002    # learning rate for critic
+GAMMA = 0.9     # reward discount
+TAU = 0.01      # soft replacement
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+MEMORY_CAPACITY = 1001
+batch_size= 64
+episodes = 1000
+steps = 200
+learnStart= 64
+
+#PER parameters
+prioritized = True
+prioritized_replay_alpha=0.6
+prioritized_replay_beta0=0.4
+prioritized_replay_beta_iters=None
+prioritized_replay_eps=1e-6
+beta_value = 0
+#beta_value = 1
+
+#unique paramters for LSTM network 
+update_freq = 4
+trace_len = 16 #16 transitions, only use the last half of the  transitions for training
+frame_skips = 4 #read 4 frames at each step and only use the last frames for updating, the action repeats at other three steps
+state_size =  8
+action_size = 2
+action_bound = 1
+EXPLORE = MEMORY_CAPACITY  # frames over which to anneal epsilon
+INITIAL_EPSILON = 1 # starting value of epsilon
+FINAL_EPSILON = 0.01 # final value of epsilon
+explorationRate = INITIAL_EPSILON
+#explorationRate = 0.01
+current_episodes = 0
+
+
+if __name__ == '__main__':
+    rospy.init_node('turtlebot3_ddpg_stage_1')
+    if prioritized:
+        myBuffer = PrioritizedReplayBuffer(MEMORY_CAPACITY, prioritized_replay_alpha)
+        if prioritized_replay_beta_iters is None:
+            prioritized_replay_beta_iters = episodes
+        #Create annealing schedule
+        beta_schedule = utils.LinearSchedule(prioritized_replay_beta_iters, initial_p=prioritized_replay_beta0, final_p=1.0)
+    else:
+        myBuffer = experience_buffer(MEMORY_CAPACITY)
+    
+    env = Env(action_size)
+
+    agent = DDPG_LSTM(state_size, action_size, action_bound)
+    total_num = sum(p.numel() for p in agent.parameters() if p.requires_grad)
+    print('Total_parameters:' ,total_num)
+    
+    ########### loading network #################
+    load_network = False
+    load_path = '/home/cameron/turtlebot3/src/turtlebot3_machine_learning-master/turtlebot3_dqn/Episode900-CReward-1290.33-totalstep135826-explore0.010000-beta_value1.000000.pth'
+    if load_network:
+        print("load model")
+        agent.load_state_dict(torch.load(load_path))
+    
+    agent = agent.to(device)
+    reward_list, episode_list = [], []
+    start_time = time.time()
+    total_steps = 0
+    collision_num = 0
+    goal_num = 0
+    #start iterating from 'current epoch'.
+    # for episode in xrange(current_episodes+1, episodes+1, 1):
+    episode = 0
+    while episode < episodes:
+        state_img , state_pos = env.reset()
+        reward_sum = 0
+        done = False
+        flag = False
+        # create experience buffer for each inner epoch
+        episodeBuffer = [] 
+        #Reset the recurrent layer's hidden state
+        hidden = None
+        if len(myBuffer.buffer) == learnStart:
+            print("Starting learning") 
+        for t in xrange(steps):
+            # add exploration noise
+            action, hidden = agent.choose_action(state_img, state_pos, hidden)
+            action = action.data.cpu().numpy()
+            #print action
+            
+            # remain 2 decimal places
+            action= np.clip(np.random.normal(action, explorationRate), 0, 1)  # add randomness to action selection for exploration
+            action[0] = round(action[0] * 0.26 , 2)  #linear: 0~0.26
+            action[1] = round(action[1] * 2 * 1.82 - 1.82, 2) #angular:-1.82~1.82 
+            
+            # agents interact with environment
+            newstate_img, newstate_pos, reward, d, info = env.step(action)
+            done = False
+            if d == 1:
+                collision_num += 1
+                done = True
+                if t == 0:
+                    flag = True
+                    break
+            elif d == 2:
+                goal_num += 1
+                done = True
+            else:
+                done = False
+            
+            if (t == steps-1):
+                print ("Time out!!")
+                done = True
+                env.jump += 1
+            
+            # store the transitions
+            episodeBuffer.append(np.hstack([state_img.reshape(-1), state_pos, action, [reward], newstate_img.reshape(-1),newstate_pos, done])) 
+
+            # update the state
+            state_img = newstate_img
+            state_pos = newstate_pos
+            reward_sum += round(reward,3)
+
+            #We reduced the epsilon gradually
+            if explorationRate > FINAL_EPSILON and len(myBuffer.buffer) > learnStart and total_steps % 20 == 0:
+                explorationRate -= (INITIAL_EPSILON - FINAL_EPSILON) / EXPLORE
+                
+            #Start Learning
+            if len(myBuffer.buffer)  >= learnStart:
+                # Update network in a update_freq
+                if total_steps % update_freq == 0: #update_freq = 4
+                    #Get a random batch of experiences
+                    if prioritized:
+                        trainBatch, weights, batch_idxes = myBuffer.sample(batch_size,trace_len, beta_value) #trace_len = 16
+                        new_priorities = agent.learn(trainBatch,trace_len,batch_size, prioritized, weights, prioritized_replay_eps,batch_idxes )
+                        myBuffer.update_priorities(batch_idxes, new_priorities)
+                    else:
+                        trainBatch = myBuffer.sample(batch_size,trace_len) #trace_len = 16
+                        new_priorities = agent.learn(trainBatch,trace_len,batch_size, prioritized, None, prioritized_replay_eps,batch_idxes )
+            
+          
+            
+            total_steps += 1
+            if done :
+                #set beta value used for importance sampling weights
+                if prioritized:
+                    beta_value = beta_schedule.value(total_steps)
+                m, s = divmod(int(time.time() - start_time), 60)
+                h, m = divmod(m , 60)
+                #h += 6
+                print("EP "+str(episode)+" - {} steps".format(t+1)+" - CReward: "+str(round(reward_sum,3)) +"  Eps="+str(round(explorationRate, 2))+"  Time: %d:%02d:%02d" % (h, m, s) )
+                break
+        
+        if flag:
+            continue
+        episode += 1
+        bufferArray = np.array(episodeBuffer)
+        episodeBuffer = list(zip(bufferArray))
+        myBuffer.add_per(episodeBuffer)
+        reward_list.append(reward_sum)
+        episode_list.append(t)
+            
+        if visualization:
+            viz.line(X=[episode],Y=[reward_sum], win='Iteration', opts=reward_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+        if visualization and  len(myBuffer.buffer)  >= learnStart and episode %10 == 0 :
+            viz.line(X=[episode],Y=[reward_sum], win='Training', opts=train_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+        if visualization and  len(myBuffer.buffer)  >= learnStart :
+            viz.line(X=[episode],Y=[reward_sum], win='Training2', opts=train_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+        if visualization and  episode %100 == 0:
+            viz.line(X=[episode],Y=[collision_num], win='collision_num', opts=collision_opt,update=None if episode > MEMORY_CAPACITY else 'append')
+            collision_num = 0      
+            viz.line(X=[episode],Y=[goal_num], win='goal_num', opts=goal_opt,update=None if episode > MEMORY_CAPACITY else 'append')    
+            goal_num = 0
+        if episode % 100 ==0:
+            #save model weights and monitoring data every 100 episodes.
+            torch.save(agent.state_dict(), '/home/cameron/turtlebot3/src/turtlebot3_machine_learning-master/turtlebot3_dqn/mymodels/Episode%d-CReward%.2f-totalstep%d-explore%f-beta_value%f.pth' % (episode, reward_sum,total_steps,explorationRate,beta_value))
+
+
+
+  
+
+
+ 
