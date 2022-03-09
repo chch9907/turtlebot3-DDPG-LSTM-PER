@@ -18,13 +18,15 @@ multi-turtlebot3 collision avoidance and navigation via DDPG-LSTM with Prioritiz
  
 * DDPG-LSTM-PER:
 
-  * **model**: DDPG-LSTM.py ,  DDPG-PER.py
+  * **model**: DDPG_LSTM.py ,  DDPG_PER.py
          
   * **environment**:  env_ddpg_lstm.py
   
   * **training**: turtlebot3_ddpg_lstm_stage_1
   
   * **launch file**: turtlebot3_ddpg_lstm_stage_1.launch
+  
+  * **utils**: utils.py as supplement for DDPG_PER.py
  
   ```bash
   roslaunch turtlebot3_ddpg_lstm_stage_1.launch
