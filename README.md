@@ -42,3 +42,5 @@ multi-turtlebot3 collision avoidance and navigation via DDPG-LSTM with Prioritiz
   * Second, you need to dupilcate*env_ddpg_lstm.py* , *turtlebot3_ddpg_lstm_stage_1* and *turtlebot3_ddpg_lstm_stage_1.launch* for each turtlebot with corresponding ids, e.g., '/tb3_1', '/tb3_2', '/tb3_3' for capturing and publishing message respectively. 
   * Third, you can use roslaunch command to launch each turtlebot node to facilitate all the turtlebots to run on one stage simultaneously. It is necessary to consider the interaction between multiple turtlebots on one stage. Particularlly when one of the turtlebot occur a collision, you need to consider whether other turtlebots should respawn since the original respawn process is implemented over the whole stage rather than a turtlebot.  
   
+## Blog
+[用Turtlebot3实现基于深度强化学习的多移动机器人导航避障的仿真训练](https://blog.csdn.net/Cameron_Rin/article/details/117027106)
